@@ -56,6 +56,12 @@ class DeviceService : Service() {
         nm.createNotificationChannel(NotificationChannel("ring", "Find phone", NotificationManager.IMPORTANCE_HIGH))
         startForeground(1, serviceNotif("Starting…"))
         registerReceiver(decisionRx, IntentFilter(Proto.ACTION_DECISION))
+        registerReceiver(stateRx, IntentFilter().apply {
+            addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
+            addAction("android.location.MODE_CHANGED")
+            addAction("android.media.VOLUME_CHANGED_ACTION")
+            addAction(AudioManager.RINGER_MODE_CHANGED_ACTION)
+        })
         Status.running = true
     }
 
@@ -67,6 +73,8 @@ class DeviceService : Service() {
     override fun onDestroy() {
         stopRing()
         unregisterReceiver(decisionRx)
+        unregisterReceiver(stateRx)
+        main.removeCallbacks(stateTask)
         advertiser?.stopAdvertising(advCb)
         server?.close(); server = null
         Status.running = false; Status.text = "Stopped"
@@ -186,6 +194,17 @@ class DeviceService : Service() {
         sessions.values.filter { it.allowed != null }.forEach { sendState(it.device) }
     }
 
+    // Debounced: system changes (Wi-Fi, location, volume) finish a moment after the command,
+    // so report the real state once they settle instead of the stale one.
+    private val stateTask = Runnable { broadcastState() }
+    private fun scheduleState(delay: Long = 200L) {
+        main.removeCallbacks(stateTask); main.postDelayed(stateTask, delay)
+    }
+
+    private val stateRx = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) { scheduleState() }
+    }
+
     // ---------- incoming ----------
     private fun onData(d: BluetoothDevice, chunk: String) {
         val s = sess(d)
@@ -204,11 +223,11 @@ class DeviceService : Service() {
         val cmd = p[0]
         val d = s.device
         when (cmd) {
-            "HELLO" -> {
+            "HELLO", "PAIR" -> {
                 if (p.size < 4) return send(d, "ERR|bad")
                 if (!store.accepting) return send(d, "ERR|disabled")
                 val id = p[1]; val name = p[2]; val type = p[3]
-                val known = store.get(id)
+                val known = if (cmd == "PAIR") null else store.get(id)
                 if (known != null) {
                     s.ctrl = known
                     s.nonce = ByteArray(16).also { SecureRandom().nextBytes(it) }.toHex()
@@ -230,8 +249,10 @@ class DeviceService : Service() {
             else -> {
                 val allowed = s.allowed ?: return send(d, "ERR|noauth")
                 if (cmd !in allowed) return send(d, "ERR|denied|$cmd")
-                try { exec(cmd, p.drop(1)) } catch (e: Exception) { send(d, "ERR|fail|$cmd") }
-                broadcastState()
+                try { exec(cmd, p.drop(1)) } catch (e: Exception) {
+                    send(d, "ERR|fail|$cmd|${if (e is SecurityException) "perm" else "error"}")
+                }
+                scheduleState(150L)
             }
         }
     }
@@ -265,7 +286,7 @@ class DeviceService : Service() {
             "ONCE" -> {
                 val prof = Proto.defaultProfile(type)
                 s.allowed = prof
-                send(d, "OK|${prof.joinToString(",")}"); sendState(d)
+                send(d, "OK|${prof.joinToString(",")}|once"); sendState(d)
             }
             "ALWAYS" -> {
                 val token = ByteArray(16).also { SecureRandom().nextBytes(it) }.toHex()
@@ -292,7 +313,10 @@ class DeviceService : Service() {
                     else -> return
                 }
                 val max = am.getStreamMaxVolume(st)
-                am.setStreamVolume(st, a[1].toInt().coerceIn(0, 100) * max / 100, 0)
+                val lvl = a[1].toInt().coerceIn(0, 100) * max / 100
+                // Ringer volume 0 flips the phone to silent, which needs Do Not Disturb access.
+                val canZero = st != AudioManager.STREAM_RING || nm.isNotificationPolicyAccessGranted
+                am.setStreamVolume(st, if (canZero) lvl else maxOf(1, lvl), 0)
             }
             "MUTE" -> am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_TOGGLE_MUTE, 0)
             "WIFI" -> {

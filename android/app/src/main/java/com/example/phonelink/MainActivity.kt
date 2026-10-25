@@ -17,6 +17,7 @@ class MainActivity : Activity() {
     private lateinit var list: LinearLayout
     private lateinit var serviceBtn: Button
     private lateinit var stopBtn: Button
+    private lateinit var perms: TextView
     private var lastSig = "?"
     private val tick = object : Runnable {
         override fun run() { refresh(); h.postDelayed(this, 1000) }
@@ -51,6 +52,10 @@ class MainActivity : Activity() {
         val battery = btn("Battery optimization settings") {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         }
+        val dnd = btn("Allow Do Not Disturb access (ringtone volume)") {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
+        }
+        perms = TextView(this).apply { textSize = 14f }
         val hint = TextView(this).apply {
             setTextIsSelectable(true); textSize = 12f
             text = "One-time, from a PC with USB debugging (needed for the Location toggle):\n" +
@@ -59,7 +64,7 @@ class MainActivity : Activity() {
         }
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
-        listOf(status, serviceBtn, stopBtn, accept, battery, hint,
+        listOf(status, serviceBtn, stopBtn, accept, perms, dnd, battery, hint,
             TextView(this).apply { text = "\nTrusted controllers"; textSize = 16f }, list)
             .forEach { root.addView(it) }
         setContentView(ScrollView(this).apply { addView(root) })
@@ -74,6 +79,11 @@ class MainActivity : Activity() {
         status.text = if (Status.running) Status.text else "Service stopped"
         serviceBtn.text = if (Status.running) "Stop service" else "Start service"
         stopBtn.visibility = if (Status.ringing) View.VISIBLE else View.GONE
+        val secure = checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        val policy = getSystemService(android.app.NotificationManager::class.java).isNotificationPolicyAccessGranted
+        perms.text = "Location toggle: " + (if (secure) "ready" else "needs the adb command below") +
+            "\nRingtone volume to 0: " + (if (policy) "ready" else "needs Do Not Disturb access")
         val c = store.all()
         val sig = c.joinToString { it.id }
         if (sig != lastSig) {

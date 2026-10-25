@@ -89,7 +89,8 @@ function ctrlId() {
   return id;
 }
 const ctrlName = () => ($('nameInput').value.trim().replace(/[|\n]/g, '') || 'My PC');
-const tokKey = () => 'pl_token_' + (device ? device.id : '');
+// The key is stored under the unique controller id (device.id changes every time the app restarts).
+const tokKey = () => 'pl_token_' + ctrlId();
 $('nameInput').value = localStorage.getItem('pl_name') || 'My PC';
 $('nameInput').addEventListener('change', () => localStorage.setItem('pl_name', ctrlName()));
 
@@ -163,29 +164,33 @@ async function handle(line) {
     case 'PENDING': setStatus('wait', 'Approve this controller on your phone…'); break;
     case 'CHAL': {
       const tok = localStorage.getItem(tokKey());
-      if (!tok) { setStatus('', 'Phone expects a saved key: forget it on the phone and reconnect'); break; }
+      if (!tok) { setStatus('wait', 'Saved key missing: approve again on your phone…'); send(`PAIR|${ctrlId()}|${ctrlName()}|pc`); break; }
       send('AUTH|' + await hmacHex(tok, p[1])); break;
     }
     case 'TOKEN': localStorage.setItem(tokKey(), p[1]); onAuthed(p[2]); break;
-    case 'OK': onAuthed(p[1]); break;
+    case 'OK': onAuthed(p[1], p[2] === 'once'); break;
     case 'STATE': applyState(p[1]); break;
     case 'ERR': onErr(p); break;
   }
 }
 
-function onAuthed(csv) {
+function onAuthed(csv, once) {
   allowed = new Set((csv || '').split(',').filter(Boolean));
   authed = true; updateEnabled();
-  setStatus('on', 'Connected to phone');
+  setStatus('on', once ? 'Connected (this session only, not remembered)' : 'Connected to phone (trusted)');
 }
 
 function onErr(p) {
   const why = p[1];
-  if (why === 'auth') { localStorage.removeItem(tokKey()); setStatus('', 'Key rejected (revoked?). Press Reconnect.'); device?.gatt.disconnect(); }
+  if (why === 'auth') { localStorage.removeItem(tokKey()); setStatus('wait', 'Key rejected: approve again on your phone…'); send(`PAIR|${ctrlId()}|${ctrlName()}|pc`); }
   else if (why === 'denied' && p[2]) toast('Not allowed for this controller: ' + p[2]);
   else if (why === 'denied') { setStatus('', 'Denied by the phone'); }
   else if (why === 'disabled') setStatus('', "Phone isn't accepting controllers");
-  else if (why === 'fail') toast('Phone could not do: ' + p[2]);
+  else if (why === 'fail') {
+    const names = { LOC: 'Location', VOL: 'Volume', WIFI: 'Wi-Fi', TORCH: 'Flashlight', RING: 'Ring' };
+    const n = names[p[2]] || p[2];
+    toast(p[3] === 'perm' ? n + ' needs a permission on the phone (open the PhoneLink app for the steps)' : 'Phone could not do: ' + n);
+  }
 }
 
 // ---- state -> UI ----
@@ -230,8 +235,7 @@ $('connectBtn').addEventListener('click', () => {
   if (authed || (device && device.gatt.connected)) device.gatt.disconnect(); else connect();
 });
 $('forgetBtn').addEventListener('click', () => {
-  if (device) { localStorage.removeItem(tokKey()); toast('Saved key removed'); }
-  else toast('Connect once first');
+  localStorage.removeItem(tokKey()); toast('Saved key removed');
 });
 </script>
 </body>
