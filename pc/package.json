@@ -1,0 +1,22 @@
+{
+  "name": "phonelink-pc",
+  "version": "0.1.0",
+  "description": "PhoneLink PC controller",
+  "main": "main.js",
+  "author": "PhoneLink",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable --publish never"
+  },
+  "build": {
+    "appId": "com.example.phonelink.pc",
+    "productName": "PhoneLink",
+    "files": ["main.js", "index.html"],
+    "win": { "target": "portable" },
+    "portable": { "artifactName": "PhoneLink-PC.exe" }
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}
