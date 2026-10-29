@@ -1,27 +1,29 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+
+let pending = null;   // Electron's callback for the Bluetooth chooser that is currently open
+let scanTimer = null;
+
+function finish(id) {
+  clearTimeout(scanTimer);
+  if (pending) { const f = pending; pending = null; f(id || ''); }
+}
+ipcMain.on('bt-select', (_e, id) => finish(id));
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 520, height: 820, autoHideMenuBar: true, backgroundColor: '#0f1115',
-    webPreferences: { contextIsolation: true }
+    width: 520, height: 860, autoHideMenuBar: true, backgroundColor: '#0f1115',
+    webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload.js') }
   });
 
-  // Electron has no built-in Bluetooth picker: auto-pick the first phone
-  // advertising the PhoneLink service (the page filters by service UUID).
-  let latest = [], cb = null, pickTimer = null, cancelTimer = null;
-  const reset = () => { clearTimeout(pickTimer); clearTimeout(cancelTimer); pickTimer = cancelTimer = null; cb = null; latest = []; };
-
+  // Electron has no built-in Bluetooth picker. It fires this event with the list of devices
+  // found so far (again whenever the list changes); we forward it to the page's own scan list.
   win.webContents.on('select-bluetooth-device', (event, devices, callback) => {
     event.preventDefault();
-    latest = devices; cb = callback;
-    if (!cancelTimer) cancelTimer = setTimeout(() => { if (cb) cb(''); reset(); }, 15000);
-    if (devices.length && !pickTimer) {
-      pickTimer = setTimeout(() => {
-        if (cb && latest.length) cb(latest[0].deviceId);
-        reset();
-      }, 1500);
-    }
+    pending = callback;
+    win.webContents.send('bt-devices', devices.map(d => ({ id: d.deviceId, name: d.deviceName || '' })));
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(() => finish(''), 45000);
   });
 
   win.loadFile(path.join(__dirname, 'index.html'));

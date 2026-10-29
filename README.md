@@ -43,6 +43,7 @@ The phone is the BLE **server**: it advertises a custom service and waits. Contr
    adb shell pm grant com.example.phonelink android.permission.WRITE_SECURE_SETTINGS
    ```
 4. On Vivo (Funtouch OS), allow **Autostart** and **background pop-ups** for the app, and set battery usage to **no restrictions**. Otherwise the service and the approval dialogs get killed.
+5. The service starts by itself when the phone boots (switch: *Start automatically when the phone boots*) and restarts its Bluetooth server whenever Bluetooth is turned back on. It will not restart after you **Force stop** the app until you open it once.
 
 ## PC setup
 
@@ -53,6 +54,13 @@ The phone is the BLE **server**: it advertises a custom service and waits. Contr
    *Always allow* stores a secret key, so the PC reconnects silently afterward.
 
 The same page also runs in Chrome or Edge from `pc/index.html` over HTTPS or localhost (Web Bluetooth).
+
+## Finding and naming devices
+
+- **Discovery**: in the PC app, click **Scan for phones**. Nearby phones running the PhoneLink service appear in a list (like Wi-Fi or Bluetooth settings); tap one to connect. The phone you used last is marked and listed first.
+- **Rename the phone**: in the phone app, edit **This phone's name** and tap **Save name**. The name is shown to controllers and is also set as the phone's Bluetooth name, which is what the scan list shows.
+- **Rename a controller**: on the PC, edit **This controller** under *Names*. On the phone, tap **Rename** next to a trusted controller to give it a label of your own.
+- **Nickname a phone on the PC**: connect, then edit **Phone nickname**. It is stored only on that PC.
 
 ## Security model
 

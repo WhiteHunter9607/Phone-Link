@@ -23,6 +23,7 @@ class DeviceService : Service() {
     private class Session(val device: BluetoothDevice) {
         var ctrl: TrustStore.Controller? = null
         var nonce: String? = null
+        var helloName: String? = null
         var allowed: Set<String>? = null            // non-null = authenticated
         var hello: Triple<String, String, String>? = null // id,name,type awaiting approval
         val buf = StringBuilder()
@@ -56,6 +57,7 @@ class DeviceService : Service() {
         nm.createNotificationChannel(NotificationChannel("ring", "Find phone", NotificationManager.IMPORTANCE_HIGH))
         startForeground(1, serviceNotif("Starting…"))
         registerReceiver(decisionRx, IntentFilter(Proto.ACTION_DECISION))
+        registerReceiver(btRx, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
         registerReceiver(stateRx, IntentFilter().apply {
             addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
             addAction("android.location.MODE_CHANGED")
@@ -66,13 +68,22 @@ class DeviceService : Service() {
     }
 
     override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
-        if (i?.action == "STOP_RING") stopRing() else startServer()
+        when (i?.action) {
+            "STOP_RING" -> stopRing()
+            "RENAME" -> {
+                noName = false
+                main.postDelayed({ advertise() }, 700)
+                sessions.values.filter { it.allowed != null }.forEach { sendInfo(it.device) }
+            }
+            else -> startServer()
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
         stopRing()
         unregisterReceiver(decisionRx)
+        unregisterReceiver(btRx)
         unregisterReceiver(stateRx)
         main.removeCallbacks(stateTask)
         advertiser?.stopAdvertising(advCb)
@@ -93,7 +104,10 @@ class DeviceService : Service() {
     private fun startServer() {
         if (server != null) return
         val bm = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
-        if (!bm.adapter.isEnabled) { updateStatus("Bluetooth is off — turn it on, then restart"); return }
+        if (!bm.adapter.isEnabled) { updateStatus("Waiting for Bluetooth — turn it on"); return }
+        if (store.hasCustomName && bm.adapter.name != store.phoneName) {
+            try { bm.adapter.name = store.phoneName } catch (_: Exception) {}
+        }
         server = bm.openGattServer(this, cb)
         val svc = BluetoothGattService(Proto.SERVICE, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         svc.addCharacteristic(BluetoothGattCharacteristic(
@@ -110,8 +124,34 @@ class DeviceService : Service() {
         advertise()
     }
 
+    private var advRetry = 0
+    private var noName = false
+
+    private fun stopServer(msg: String) {
+        try { advertiser?.stopAdvertising(advCb) } catch (_: Exception) {}
+        advertiser = null
+        try { server?.close() } catch (_: Exception) {}
+        server = null; evt = null
+        sessions.clear(); mtu.clear(); outQ.clear(); sending = false
+        updateStatus(msg)
+    }
+
+    // Bluetooth turned on -> start serving again; turned off -> shut the server down cleanly.
+    private val btRx = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            when (i.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_ON -> main.postDelayed({ startServer() }, 500)
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF ->
+                    stopServer("Waiting for Bluetooth — turn it on")
+            }
+        }
+    }
+
     private val advCb = object : AdvertiseCallback() {
-        override fun onStartFailure(errorCode: Int) { updateStatus("Advertising failed (code $errorCode)") }
+        override fun onStartFailure(errorCode: Int) {
+            if (errorCode == ADVERTISE_FAILED_DATA_TOO_LARGE && !noName) { noName = true; main.post { advertise() } }
+            else updateStatus("Advertising failed (code $errorCode)")
+        }
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) { updateStatus("Ready — advertising") }
     }
 
@@ -119,7 +159,13 @@ class DeviceService : Service() {
         val adapter = (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
         if (!adapter.isEnabled) { updateStatus("Bluetooth is off"); return }
         val adv = adapter.bluetoothLeAdvertiser
-        if (adv == null) { updateStatus("This phone can't advertise over BLE"); return }
+        if (adv == null) {
+            // Right after boot / Bluetooth-on the advertiser can take a moment to appear.
+            if (advRetry++ < 5) { updateStatus("Waiting for Bluetooth…"); main.postDelayed({ advertise() }, 2000) }
+            else updateStatus("This phone can't advertise over BLE")
+            return
+        }
+        advRetry = 0
         advertiser = adv
         adv.stopAdvertising(advCb)
         val st = AdvertiseSettings.Builder().setConnectable(true)
@@ -127,7 +173,9 @@ class DeviceService : Service() {
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH).setTimeout(0).build()
         val data = AdvertiseData.Builder().setIncludeDeviceName(false)
             .addServiceUuid(ParcelUuid(Proto.SERVICE)).build()
-        adv.startAdvertising(st, data, advCb)
+        // The scan response carries the Bluetooth name so controllers can list this phone by name.
+        val scan = AdvertiseData.Builder().setIncludeDeviceName(true).build()
+        if (noName) adv.startAdvertising(st, data, advCb) else adv.startAdvertising(st, data, scan, advCb)
     }
 
     private fun sess(d: BluetoothDevice) = sessions.getOrPut(d.address) { Session(d) }
@@ -190,6 +238,11 @@ class DeviceService : Service() {
             "torch=${if (torchOn) 1 else 0};ring=${if (player != null) 1 else 0}")
     }
 
+    // Tells the controller this phone's id and (custom) name.
+    private fun sendInfo(d: BluetoothDevice) {
+        send(d, "INFO|${store.phoneId}|${store.phoneName.replace("|", " ")}")
+    }
+
     private fun broadcastState() {
         sessions.values.filter { it.allowed != null }.forEach { sendState(it.device) }
     }
@@ -230,6 +283,7 @@ class DeviceService : Service() {
                 val known = if (cmd == "PAIR") null else store.get(id)
                 if (known != null) {
                     s.ctrl = known
+                    s.helloName = name.replace("\n", " ").trim().take(24)
                     s.nonce = ByteArray(16).also { SecureRandom().nextBytes(it) }.toHex()
                     send(d, "CHAL|${s.nonce}")
                 } else {
@@ -242,9 +296,16 @@ class DeviceService : Service() {
                 val c = s.ctrl; val n = s.nonce
                 if (c != null && n != null && p.size >= 2 && p[1].equals(hmacHex(c.token, n), true)) {
                     s.allowed = c.allowed; s.nonce = null
+                    val hn = s.helloName
+                    if (!hn.isNullOrBlank() && hn != c.name) { c.name = hn; store.add(c) }
                     send(d, "OK|${c.allowed.joinToString(",")}")
-                    sendState(d)
+                    sendInfo(d); sendState(d)
                 } else send(d, "ERR|auth")
+            }
+            "NAME" -> {
+                val c = s.ctrl
+                val n = p.getOrNull(1)?.trim()?.take(24)
+                if (s.allowed != null && c != null && !n.isNullOrEmpty()) { c.name = n; store.add(c) }
             }
             else -> {
                 val allowed = s.allowed ?: return send(d, "ERR|noauth")
@@ -286,14 +347,15 @@ class DeviceService : Service() {
             "ONCE" -> {
                 val prof = Proto.defaultProfile(type)
                 s.allowed = prof
-                send(d, "OK|${prof.joinToString(",")}|once"); sendState(d)
+                send(d, "OK|${prof.joinToString(",")}|once"); sendInfo(d); sendState(d)
             }
             "ALWAYS" -> {
                 val token = ByteArray(16).also { SecureRandom().nextBytes(it) }.toHex()
                 val prof = Proto.defaultProfile(type)
                 store.add(TrustStore.Controller(id, name, type, token, prof))
                 s.allowed = prof
-                send(d, "TOKEN|$token|${prof.joinToString(",")}"); sendState(d)
+                s.ctrl = store.get(id)
+                send(d, "TOKEN|$token|${prof.joinToString(",")}"); sendInfo(d); sendState(d)
             }
             else -> {
                 send(d, "ERR|denied")

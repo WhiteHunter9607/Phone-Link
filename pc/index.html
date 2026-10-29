@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PhoneLink PC Controller</title>
 <style>
+  [hidden] { display:none !important; }
   :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --text:#e8eaf0; --dim:#8b93a5; --accent:#4f8cff; --ok:#3ddc84; --bad:#ff5d5d; --wait:#ffb84d; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:16px system-ui, sans-serif; }
@@ -28,10 +29,22 @@
   .ring.on { background:var(--bad); border-color:var(--bad); }
   .mute { width:100%; margin-top:6px; background:#222631; border:1px solid var(--line); border-radius:10px; padding:10px; }
   button:disabled, input:disabled { opacity:.35; cursor:not-allowed; }
-  footer { margin-top:14px; color:var(--dim); font-size:13px; display:grid; gap:8px; }
-  footer input[type=text] { background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px 8px; font:inherit; }
   .link { background:none; border:0; color:var(--accent); padding:0; text-decoration:underline; text-align:left; }
-  #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#000c; padding:8px 14px; border-radius:10px; display:none; }
+  .sub { margin:8px 4px 0; }
+  .field { display:grid; grid-template-columns:130px 1fr auto; align-items:center; gap:8px; margin:8px 0; color:var(--dim); font-size:14px; }
+  .field input { background:#12151b; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; min-width:0; }
+  .small { background:#222631; border:1px solid var(--line); border-radius:8px; padding:8px 12px; }
+  .sheet { position:fixed; inset:0; background:#000b; display:flex; align-items:center; justify-content:center; padding:16px; z-index:10; }
+  .sheet-box { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:18px; width:100%; max-width:420px; max-height:85vh; overflow:auto; }
+  .sheet-box h3 { margin:0 0 6px; font-size:18px; }
+  #scanHint { margin:0 0 12px; color:var(--dim); font-size:14px; }
+  #scanList { display:grid; gap:8px; margin-bottom:12px; }
+  .dev { display:flex; justify-content:space-between; align-items:center; text-align:left; background:#222631; border:1px solid var(--line); border-radius:12px; padding:14px; font-size:16px; }
+  .dev small { color:var(--ok); font-size:12px; }
+  .dev:hover { border-color:var(--accent); }
+  .ghost { background:none; border:1px solid var(--line); border-radius:10px; padding:10px; width:100%; }
+  footer { margin-top:14px; color:var(--dim); font-size:13px; }
+  #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#000c; padding:8px 14px; border-radius:10px; display:none; max-width:90vw; text-align:center; }
 </style>
 </head>
 <body>
@@ -39,8 +52,9 @@
   <header>
     <span id="dot" class="dot"></span>
     <span id="statusText">Not connected</span>
-    <button id="connectBtn" class="primary">Connect</button>
+    <button id="connectBtn" class="primary">Scan for phones</button>
   </header>
+  <div class="sub"><button id="rescanBtn" class="link" hidden>Scan for another phone</button></div>
 
   <section>
     <h2>Volume</h2>
@@ -64,12 +78,24 @@
     <button id="ringBtn" class="ring" data-cmd="RING" data-key="ring" disabled>Ring my phone</button>
   </section>
 
-  <footer>
-    <label>Controller name <input id="nameInput" type="text" maxlength="24"></label>
-    <button id="forgetBtn" class="link">Forget saved key for this phone</button>
-    <span>Works in Chrome or Edge over HTTPS (or localhost). The phone must be running the PhoneLink service.</span>
-  </footer>
+  <section>
+    <h2>Names</h2>
+    <label class="field">This controller <input id="nameInput" type="text" maxlength="24"><button id="saveName" class="small">Save</button></label>
+    <label class="field">Phone nickname <input id="nickInput" type="text" maxlength="24" placeholder="Connect to a phone first" disabled><button id="saveNick" class="small" disabled>Save</button></label>
+    <button id="forgetBtn" class="link">Forget this controller's saved key</button>
+  </section>
+
+  <footer>Works in Chrome or Edge over HTTPS (or localhost), and in the PhoneLink desktop app. The phone must be running the PhoneLink service.</footer>
 </main>
+
+<div id="scan" class="sheet" hidden>
+  <div class="sheet-box">
+    <h3>Nearby phones</h3>
+    <p id="scanHint">Scanning…</p>
+    <div id="scanList"></div>
+    <button id="scanCancel" class="ghost">Cancel</button>
+  </div>
+</div>
 <div id="toast"></div>
 
 <script>
@@ -79,20 +105,21 @@ const EVT     = '6e5a0003-7b1c-4f0e-9a52-1c0d5e7a0001';
 const $ = id => document.getElementById(id);
 const enc = new TextEncoder(), dec = new TextDecoder();
 
-let device = null, cmdChar = null, authed = false, allowed = new Set();
+let device = null, cmdChar = null, authed = false, connOnce = false, allowed = new Set();
 let buf = '', writeChain = Promise.resolve();
+let phone = { id: null, name: '' };
+const nicks = JSON.parse(localStorage.getItem('pl_nicks') || '{}');
 
-// ---- identity & key storage ----
+// ---- identity & key storage (keyed by the unique controller id) ----
 function ctrlId() {
   let id = localStorage.getItem('pl_id');
   if (!id) { id = [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toString(16).padStart(2, '0')).join(''); localStorage.setItem('pl_id', id); }
   return id;
 }
-const ctrlName = () => ($('nameInput').value.trim().replace(/[|\n]/g, '') || 'My PC');
-// The key is stored under the unique controller id (device.id changes every time the app restarts).
+const cleanName = s => (s || '').replace(/[|\r\n]/g, ' ').trim().slice(0, 24);
+const ctrlName = () => cleanName($('nameInput').value) || 'My PC';
 const tokKey = () => 'pl_token_' + ctrlId();
 $('nameInput').value = localStorage.getItem('pl_name') || 'My PC';
-$('nameInput').addEventListener('change', () => localStorage.setItem('pl_name', ctrlName()));
 
 // ---- helpers ----
 const hexToBytes = h => new Uint8Array(h.match(/../g).map(x => parseInt(x, 16)));
@@ -101,15 +128,61 @@ async function hmacHex(tokenHex, nonceHex) {
   const key = await crypto.subtle.importKey('raw', hexToBytes(tokenHex), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return bytesToHex(new Uint8Array(await crypto.subtle.sign('HMAC', key, hexToBytes(nonceHex))));
 }
+const phoneLabel = () => (phone.id && nicks[phone.id]) || phone.name || 'phone';
+
+function refreshButtons() {
+  const connected = authed || (device && device.gatt && device.gatt.connected);
+  $('connectBtn').textContent = connected ? 'Disconnect' : (device ? 'Reconnect' : 'Scan for phones');
+  $('rescanBtn').hidden = connected || !device;
+}
 function setStatus(kind, text) {
   $('dot').className = 'dot ' + kind;
   $('statusText').textContent = text;
-  $('connectBtn').textContent = authed ? 'Disconnect' : (device ? 'Reconnect' : 'Connect');
+  refreshButtons();
 }
 let toastT;
-function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toastT); toastT = setTimeout(() => el.style.display = 'none', 2500); }
+function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toastT); toastT = setTimeout(() => el.style.display = 'none', 3000); }
 function updateEnabled() {
   document.querySelectorAll('[data-cmd]').forEach(el => { el.disabled = !(authed && allowed.has(el.dataset.cmd)); });
+}
+function resetPhone() {
+  phone = { id: null, name: '' };
+  $('nickInput').value = ''; $('nickInput').disabled = true; $('saveNick').disabled = true;
+}
+function renderConnected() {
+  if (!authed) return;
+  setStatus('on', 'Connected to ' + phoneLabel() + (connOnce ? ' (this session only)' : ' (trusted)'));
+}
+
+// ---- discovery ----
+function renderScan(list) {
+  const el = $('scanList'); el.innerHTML = '';
+  $('scanHint').textContent = list.length
+    ? 'Tap a phone to connect.'
+    : 'Scanning… make sure the PhoneLink service is running on your phone and it is close by.';
+  const last = localStorage.getItem('pl_last_phone') || '';
+  list.sort((a, b) => (b.name === last && !!last) - (a.name === last && !!last));
+  for (const d of list) {
+    const b = document.createElement('button');
+    b.className = 'dev';
+    const n = document.createElement('span');
+    n.textContent = d.name || 'Unnamed phone';       // names come from nearby devices: show as text only
+    b.appendChild(n);
+    if (last && d.name === last) { const t = document.createElement('small'); t.textContent = 'Last used'; b.appendChild(t); }
+    b.addEventListener('click', () => window.plBridge.select(d.id));
+    el.appendChild(b);
+  }
+}
+if (window.plBridge) window.plBridge.onDevices(renderScan);
+$('scanCancel').addEventListener('click', () => { $('scan').hidden = true; window.plBridge && window.plBridge.select(''); });
+
+async function pickDevice() {
+  const opts = { filters: [{ services: [SERVICE] }] };
+  if (!window.plBridge) return navigator.bluetooth.requestDevice(opts);   // Chrome/Edge show their own picker
+  renderScan([]);
+  $('scan').hidden = false;
+  try { return await navigator.bluetooth.requestDevice(opts); }
+  finally { $('scan').hidden = true; }
 }
 
 // ---- BLE ----
@@ -124,10 +197,15 @@ function send(line) {
   return writeChain;
 }
 
-async function connect() {
+async function connect(forceScan = false) {
   if (!navigator.bluetooth) { setStatus('', 'Web Bluetooth not supported: use Chrome or Edge'); return; }
   try {
-    if (!device) device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
+    if (!device || forceScan) {
+      if (device) { device.removeEventListener('gattserverdisconnected', onDisconnected); if (device.gatt.connected) device.gatt.disconnect(); }
+      device = null; authed = false; allowed = new Set(); updateEnabled(); resetPhone();
+      setStatus('wait', 'Scanning for phones…');
+      device = await pickDevice();
+    }
     device.addEventListener('gattserverdisconnected', onDisconnected);
     setStatus('wait', 'Connecting…');
     const server = await device.gatt.connect();
@@ -137,15 +215,18 @@ async function connect() {
     evt.addEventListener('characteristicvaluechanged', onNotify);
     await evt.startNotifications();
     buf = ''; authed = false; allowed = new Set(); updateEnabled();
+    if (device.name) localStorage.setItem('pl_last_phone', device.name);
     setStatus('wait', 'Contacting phone…');
     await send(`HELLO|${ctrlId()}|${ctrlName()}|pc`);
   } catch (e) {
-    setStatus('', e.name === 'NotFoundError' ? 'No device chosen' : 'Connection failed: ' + e.message);
+    if (e.name === 'NotFoundError') { device = null; setStatus('', 'No phone chosen'); }
+    else if (e.name === 'InvalidStateError') setStatus('', 'A scan is still finishing: wait a few seconds and try again');
+    else setStatus('', 'Connection failed: ' + e.message);
   }
 }
 
 function onDisconnected() {
-  authed = false; allowed = new Set(); updateEnabled();
+  authed = false; allowed = new Set(); updateEnabled(); resetPhone();
   setStatus('', 'Disconnected');
 }
 
@@ -167,8 +248,13 @@ async function handle(line) {
       if (!tok) { setStatus('wait', 'Saved key missing: approve again on your phone…'); send(`PAIR|${ctrlId()}|${ctrlName()}|pc`); break; }
       send('AUTH|' + await hmacHex(tok, p[1])); break;
     }
-    case 'TOKEN': localStorage.setItem(tokKey(), p[1]); onAuthed(p[2]); break;
+    case 'TOKEN': localStorage.setItem(tokKey(), p[1]); onAuthed(p[2], false); break;
     case 'OK': onAuthed(p[1], p[2] === 'once'); break;
+    case 'INFO':
+      phone = { id: p[1], name: p.slice(2).join('|') };
+      $('nickInput').disabled = false; $('saveNick').disabled = false;
+      $('nickInput').value = nicks[phone.id] || phone.name;
+      renderConnected(); break;
     case 'STATE': applyState(p[1]); break;
     case 'ERR': onErr(p); break;
   }
@@ -176,8 +262,8 @@ async function handle(line) {
 
 function onAuthed(csv, once) {
   allowed = new Set((csv || '').split(',').filter(Boolean));
-  authed = true; updateEnabled();
-  setStatus('on', once ? 'Connected (this session only, not remembered)' : 'Connected to phone (trusted)');
+  authed = true; connOnce = !!once; updateEnabled();
+  renderConnected();
 }
 
 function onErr(p) {
@@ -234,9 +320,25 @@ document.querySelectorAll('input[data-stream]').forEach(sl => {
 $('connectBtn').addEventListener('click', () => {
   if (authed || (device && device.gatt.connected)) device.gatt.disconnect(); else connect();
 });
-$('forgetBtn').addEventListener('click', () => {
-  localStorage.removeItem(tokKey()); toast('Saved key removed');
+$('rescanBtn').addEventListener('click', () => connect(true));
+
+// ---- names ----
+$('saveName').addEventListener('click', () => {
+  const n = ctrlName();
+  localStorage.setItem('pl_name', n); $('nameInput').value = n;
+  if (authed) send('NAME|' + n);
+  toast('Controller name saved');
 });
+$('saveNick').addEventListener('click', () => {
+  if (!phone.id) { toast('Connect to a phone first'); return; }
+  const v = cleanName($('nickInput').value);
+  if (v && v !== phone.name) nicks[phone.id] = v; else delete nicks[phone.id];
+  localStorage.setItem('pl_nicks', JSON.stringify(nicks));
+  renderConnected(); toast('Phone renamed on this PC');
+});
+$('forgetBtn').addEventListener('click', () => { localStorage.removeItem(tokKey()); toast('Saved key removed'); });
+
+resetPhone(); refreshButtons();
 </script>
 </body>
 </html>

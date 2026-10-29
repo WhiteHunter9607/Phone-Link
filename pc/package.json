@@ -11,7 +11,7 @@
   "build": {
     "appId": "com.example.phonelink.pc",
     "productName": "PhoneLink",
-    "files": ["main.js", "index.html"],
+    "files": ["main.js", "preload.js", "index.html"],
     "win": { "target": "portable" },
     "portable": { "artifactName": "PhoneLink-PC.exe" }
   },
